@@ -38,7 +38,7 @@ MOTIF_LDFLAGS = -L$(MOTIFDIR)/lib -Wl,-R,$(MOTIFDIR)/lib \
 MOTIF_LIBS = -lXm -lXt -lX11 -lm
 
 # Shared source objects (used by all three targets)
-SHARED_SRCS = http.c json.c html.c config.c pkgdb.c
+SHARED_SRCS = http.c json.c html.c config.c pkgdb.c integrity.c process.c
 SHARED_OBJS = $(SHARED_SRCS:.c=.o)
 
 # CLI
@@ -87,7 +87,9 @@ http.o: http.c http.h config.h
 json.o: json.c json.h
 html.o: html.c html.h
 config.o: config.c config.h
-pkgdb.o: pkgdb.c pkgdb.h http.h json.h html.h config.h
+process.o: process.c process.h
+integrity.o: integrity.c integrity.h
+pkgdb.o: process.h integrity.h pkgdb.c pkgdb.h http.h json.h html.h config.h
 
 clean:
 	rm -f $(CLI_TARGET) $(GUI_TARGET) $(AGENT_TARGET) \

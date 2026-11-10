@@ -41,17 +41,24 @@
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
 typedef struct ssl_method_st SSL_METHOD;
+typedef struct X509_VERIFY_PARAM_st X509_VERIFY_PARAM;
 
 /* OpenSSL constants */
 #define SPM_SSL_OP_NO_SSLv2              0x01000000L
 #define SPM_SSL_OP_NO_SSLv3              0x02000000L
-#define SPM_SSL_VERIFY_NONE              0
 #define SPM_SSL_VERIFY_PEER              1
 #define SPM_SSL_CTRL_OPTIONS             32
 #define SPM_SSL_CTRL_SET_TLSEXT_HOSTNAME 55
 #define SPM_X509_V_OK                    0
 #define SPM_INIT_LOAD_SSL_STRINGS        0x00200000L
 #define SPM_INIT_LOAD_CRYPTO_STRINGS     0x02000000L
+
+typedef X509_VERIFY_PARAM *(*pfn_SSL_get0_param)(SSL *);
+typedef int (*pfn_X509_VERIFY_PARAM_set1_host)(X509_VERIFY_PARAM *, const char *, size_t);
+typedef int (*pfn_X509_VERIFY_PARAM_set1_ip_asc)(X509_VERIFY_PARAM *, const char *);
+static pfn_SSL_get0_param dl_SSL_get0_param;
+static pfn_X509_VERIFY_PARAM_set1_host dl_X509_VERIFY_PARAM_set1_host;
+static pfn_X509_VERIFY_PARAM_set1_ip_asc dl_X509_VERIFY_PARAM_set1_ip_asc;
 
 /* Function pointer types */
 typedef int          (*pfn_OPENSSL_init_ssl)(unsigned long long, void *);
@@ -119,21 +126,29 @@ static int load_openssl(void)
 
     /* Load libcrypto first (libssl depends on it).
      * Search order: Sunstorm (/opt/sst/lib), TGCware, then system. */
+#ifdef SPM_TEST_CRYPTO_LIBRARY
+    crypto_lib_handle = dlopen(SPM_TEST_CRYPTO_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
+#else
     crypto_lib_handle = dlopen("/opt/sst/lib/libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
     if (!crypto_lib_handle)
         crypto_lib_handle = dlopen("/usr/tgcware/lib/libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
     if (!crypto_lib_handle)
         crypto_lib_handle = dlopen("libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
+#endif
     if (!crypto_lib_handle) {
         fprintf(stderr, "spm: cannot load libcrypto: %s\n", dlerror());
         return -1;
     }
 
+#ifdef SPM_TEST_SSL_LIBRARY
+    ssl_lib_handle = dlopen(SPM_TEST_SSL_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
+#else
     ssl_lib_handle = dlopen("/opt/sst/lib/libssl.so", RTLD_NOW | RTLD_GLOBAL);
     if (!ssl_lib_handle)
         ssl_lib_handle = dlopen("/usr/tgcware/lib/libssl.so", RTLD_NOW | RTLD_GLOBAL);
     if (!ssl_lib_handle)
         ssl_lib_handle = dlopen("libssl.so", RTLD_NOW | RTLD_GLOBAL);
+#endif
     if (!ssl_lib_handle) {
         fprintf(stderr, "spm: cannot load libssl: %s\n", dlerror());
         return -1;
@@ -163,6 +178,9 @@ static int load_openssl(void)
     LOAD_SYM(ssl_lib_handle, SSL_CTX_load_verify_locations);
     LOAD_SYM(ssl_lib_handle, SSL_CTX_set_verify);
     LOAD_SYM(ssl_lib_handle, SSL_CTX_free);
+    LOAD_SYM(ssl_lib_handle, SSL_get0_param);
+    LOAD_SYM(crypto_lib_handle, X509_VERIFY_PARAM_set1_host);
+    LOAD_SYM(crypto_lib_handle, X509_VERIFY_PARAM_set1_ip_asc);
     LOAD_SYM(ssl_lib_handle, SSL_new);
     LOAD_SYM(ssl_lib_handle, SSL_set_fd);
     LOAD_SYM(ssl_lib_handle, SSL_ctrl);
@@ -191,6 +209,7 @@ static int load_openssl(void)
 
 /* Global SSL context */
 static SSL_CTX *g_ssl_ctx = NULL;
+static int g_ca_explicit = 0;
 static char g_ca_bundle[512] = "/opt/sst/etc/ssl/certs/ca-bundle.crt";
 
 /* ================================================================
@@ -199,6 +218,7 @@ static char g_ca_bundle[512] = "/opt/sst/etc/ssl/certs/ca-bundle.crt";
 
 int http_init(void)
 {
+    if (g_ssl_ctx) return 0;
     if (load_openssl() < 0) return -1;
 
     /* Initialize OpenSSL */
@@ -225,23 +245,16 @@ int http_init(void)
     dl_SSL_CTX_ctrl(g_ssl_ctx, SPM_SSL_CTRL_OPTIONS,
                     SPM_SSL_OP_NO_SSLv2 | SPM_SSL_OP_NO_SSLv3, NULL);
 
-    /* Load CA certificates for verification.
-     * Search order: Sunstorm, TGCware, system. */
-    if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, g_ca_bundle, NULL) != 1) {
-        if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx,
-                "/usr/tgcware/etc/curl-ca-bundle.pem", NULL) != 1) {
-            if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx,
-                    "/usr/tgcware/share/curl/curl-ca-bundle.crt", NULL) != 1) {
-                if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx,
-                        "/etc/ssl/certs/ca-certificates.crt", NULL) != 1) {
-                    fprintf(stderr, "spm: warning: cannot load CA certs\n");
-                    fprintf(stderr, "  tried: %s\n", g_ca_bundle);
-                    fprintf(stderr, "  HTTPS verification disabled\n");
-                    dl_SSL_CTX_set_verify(g_ssl_ctx, SPM_SSL_VERIFY_NONE, NULL);
-                    return 0;
-                }
-            }
-        }
+    /* An explicitly configured trust store must work as configured. */
+    if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, g_ca_bundle, NULL) != 1 &&
+        (g_ca_explicit ||
+         (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/usr/tgcware/etc/curl-ca-bundle.pem", NULL) != 1 &&
+          dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/usr/tgcware/share/curl/curl-ca-bundle.crt", NULL) != 1 &&
+          dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/etc/ssl/certs/ca-certificates.crt", NULL) != 1))) {
+        fprintf(stderr, "spm: cannot load trusted CA certificates: %s\n", g_ca_bundle);
+        dl_SSL_CTX_free(g_ssl_ctx);
+        g_ssl_ctx = NULL;
+        return -1;
     }
 
     dl_SSL_CTX_set_verify(g_ssl_ctx, SPM_SSL_VERIFY_PEER, NULL);
@@ -264,6 +277,8 @@ void http_shutdown(void)
 void http_set_ca_bundle(const char *path)
 {
     if (path) {
+        if (g_ssl_ctx) { dl_SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = NULL; }
+        g_ca_explicit = 1;
         strncpy(g_ca_bundle, path, sizeof(g_ca_bundle) - 1);
         g_ca_bundle[sizeof(g_ca_bundle) - 1] = '\0';
     }
@@ -282,67 +297,70 @@ typedef struct {
 
 static int parse_url(const char *url, parsed_url_t *u)
 {
-    const char *p, *host_start, *path_start, *port_start;
-    int host_len;
-
+    const char *p, *authority, *path, *colon, *cursor;
+    size_t host_length, authority_length;
+    long port;
+    char *end;
+    if (!url || !u) return -1;
     memset(u, 0, sizeof(*u));
-
+    for (cursor = url; *cursor; cursor++)
+        if ((unsigned char)*cursor <= 32 || (unsigned char)*cursor >= 127) return -1;
     p = strstr(url, "://");
-    if (!p) return -1;
-    if (p - url >= (int)sizeof(u->scheme)) return -1;
+    if (!p || p - url >= (int)sizeof(u->scheme)) return -1;
     memcpy(u->scheme, url, p - url);
-    u->scheme[p - url] = '\0';
-
-    host_start = p + 3;
-
-    if (strcmp(u->scheme, "https") == 0)
-        u->port = 443;
-    else
-        u->port = 80;
-
-    path_start = strchr(host_start, '/');
-    if (!path_start) {
-        strcpy(u->path, "/");
-        host_len = strlen(host_start);
+    if (strcmp(u->scheme, "https") == 0) u->port = 443;
+    else if (strcmp(u->scheme, "http") == 0) u->port = 80;
+    else return -1;
+    authority = p + 3;
+    path = strpbrk(authority, "/?#");
+    authority_length = path ? (size_t)(path - authority) : strlen(authority);
+    colon = memchr(authority, ':', authority_length);
+    host_length = colon ? (size_t)(colon - authority) : authority_length;
+    if (!host_length || host_length >= sizeof(u->host)) return -1;
+    for (cursor = authority; cursor < authority + host_length; cursor++)
+        if (!( (*cursor >= 'a' && *cursor <= 'z') || (*cursor >= 'A' && *cursor <= 'Z') ||
+               (*cursor >= '0' && *cursor <= '9') || *cursor == '.' || *cursor == '-')) return -1;
+    memcpy(u->host, authority, host_length);
+    if (colon) {
+        if (colon + 1 == authority + authority_length) return -1;
+        for (cursor = colon + 1; cursor < authority + authority_length; cursor++)
+            if (*cursor < '0' || *cursor > '9') return -1;
+        errno = 0;
+        port = strtol(colon + 1, &end, 10);
+        if (errno || end != authority + authority_length || port < 1 || port > 65535) return -1;
+        u->port = (int)port;
+    }
+    if (path && strchr(path, '#')) return -1;
+    if (!path) strcpy(u->path, "/");
+    else if (*path == '?') {
+        if (strlen(path) + 1 >= sizeof(u->path)) return -1;
+        strcpy(u->path, "/"); strcat(u->path, path);
     } else {
-        strncpy(u->path, path_start, sizeof(u->path) - 1);
-        host_len = path_start - host_start;
+        if (strlen(path) >= sizeof(u->path)) return -1;
+        strcpy(u->path, path);
     }
-
-    port_start = NULL;
-    {
-        const char *bracket = strchr(host_start, ']');
-        const char *colon;
-        if (bracket && bracket < host_start + host_len)
-            colon = strchr(bracket, ':');
-        else
-            colon = strchr(host_start, ':');
-        if (colon && colon < host_start + host_len)
-            port_start = colon;
-    }
-
-    if (port_start) {
-        int hlen = port_start - host_start;
-        if (hlen >= (int)sizeof(u->host)) hlen = sizeof(u->host) - 1;
-        memcpy(u->host, host_start, hlen);
-        u->host[hlen] = '\0';
-        u->port = atoi(port_start + 1);
-    } else {
-        if (host_len >= (int)sizeof(u->host)) host_len = sizeof(u->host) - 1;
-        memcpy(u->host, host_start, host_len);
-        u->host[host_len] = '\0';
-    }
-
     return 0;
 }
 
-static void build_url(const parsed_url_t *u, char *buf, int buflen)
+/* Resolve the supported absolute/root-relative forms, then enforce transport. */
+static char *redirect_url(const parsed_url_t *origin, const char *location)
 {
-    int dp = (strcmp(u->scheme, "https") == 0) ? 443 : 80;
-    if (u->port == dp)
-        snprintf(buf, buflen, "%s://%s%s", u->scheme, u->host, u->path);
-    else
-        snprintf(buf, buflen, "%s://%s:%d%s", u->scheme, u->host, u->port, u->path);
+    char candidate[4096];
+    parsed_url_t target;
+    int n;
+    if (!location || !*location) return NULL;
+    if (strncmp(location, "//", 2) == 0)
+        n = snprintf(candidate, sizeof(candidate), "%s:%s", origin->scheme, location);
+    else if (*location == '/')
+        n = snprintf(candidate, sizeof(candidate), "%s://%s:%d%s",
+                     origin->scheme, origin->host, origin->port, location);
+    else n = snprintf(candidate, sizeof(candidate), "%s", location);
+    if (n < 0 || n >= (int)sizeof(candidate) || parse_url(candidate, &target) < 0) return NULL;
+    if (strcmp(origin->scheme, "https") == 0 && strcmp(target.scheme, "https") != 0) {
+        fprintf(stderr, "spm: rejected HTTPS downgrade redirect\n");
+        return NULL;
+    }
+    return strdup(candidate);
 }
 
 /* ================================================================
@@ -403,6 +421,7 @@ static http_conn_t *conn_open(const char *host, int port, int use_ssl)
     if (fd < 0) return NULL;
 
     c = (http_conn_t *)calloc(1, sizeof(http_conn_t));
+    if (!c) { close(fd); return NULL; }
     c->fd = fd;
     c->is_ssl = use_ssl;
     c->ssl = NULL;
@@ -417,10 +436,24 @@ static http_conn_t *conn_open(const char *host, int port, int use_ssl)
         c->ssl = dl_SSL_new(g_ssl_ctx);
         if (!c->ssl) { close(fd); free(c); return NULL; }
 
-        dl_SSL_set_fd(c->ssl, fd);
-
-        /* SNI: set hostname for virtual hosts */
-        dl_SSL_ctrl(c->ssl, SPM_SSL_CTRL_SET_TLSEXT_HOSTNAME, 0, (void *)host);
+        {
+            X509_VERIFY_PARAM *param = dl_SSL_get0_param(c->ssl);
+            struct in_addr address;
+            int verified_name = 0;
+            if (param) {
+                if (inet_pton(AF_INET, host, &address) == 1)
+                    verified_name = dl_X509_VERIFY_PARAM_set1_ip_asc(param, host);
+                else {
+                    verified_name = dl_X509_VERIFY_PARAM_set1_host(param, host, 0);
+                    if (dl_SSL_ctrl(c->ssl, SPM_SSL_CTRL_SET_TLSEXT_HOSTNAME, 0, (void *)host) != 1)
+                        verified_name = 0;
+                }
+            }
+            if (!verified_name || dl_SSL_set_fd(c->ssl, fd) != 1) {
+                fprintf(stderr, "spm: cannot configure TLS identity verification\n");
+                dl_SSL_free(c->ssl); close(fd); free(c); return NULL;
+            }
+        }
 
         if (dl_SSL_connect(c->ssl) != 1) {
             fprintf(stderr, "spm: SSL handshake failed to %s:%d\n",
@@ -432,8 +465,8 @@ static http_conn_t *conn_open(const char *host, int port, int use_ssl)
         }
 
         if (dl_SSL_get_verify_result(c->ssl) != SPM_X509_V_OK) {
-            fprintf(stderr, "spm: warning: cert verification failed for %s\n",
-                    host);
+            fprintf(stderr, "spm: cert verification failed for %s\n", host);
+            dl_SSL_free(c->ssl); close(fd); free(c); return NULL;
         }
     }
 
@@ -485,7 +518,7 @@ static char *recv_all(http_conn_t *c, long *out_len)
     char tmp[HTTP_RECV_BUF];
 
     while ((n = conn_recv(c, tmp, sizeof(tmp))) > 0) {
-        if (total + n > HTTP_MAX_RESP) break;
+        if (total + n > HTTP_MAX_RESP) { free(buf); return NULL; }
         if (total + n > alloc) {
             alloc = (total + n) * 2;
             if (alloc > HTTP_MAX_RESP) alloc = HTTP_MAX_RESP;
@@ -496,6 +529,7 @@ static char *recv_all(http_conn_t *c, long *out_len)
         total += n;
     }
 
+    if (n < 0) { free(buf); return NULL; }
     if (buf) buf[total] = '\0';
     *out_len = total;
     return buf;
@@ -638,23 +672,16 @@ static int do_http_get(const char *url, http_response_t *resp, int depth)
     rc = parse_response(raw, raw_len, resp);
     free(raw);
     if (rc < 0) return -1;
+    if (resp->content_length >= 0 && resp->body_len != resp->content_length) {
+        http_response_free(resp); return -1;
+    }
 
     /* Handle redirects */
     if ((resp->status_code == 301 || resp->status_code == 302 ||
-         resp->status_code == 303 || resp->status_code == 307) &&
+         resp->status_code == 303 || resp->status_code == 307 || resp->status_code == 308) &&
         resp->location) {
-        char *new_url;
-        if (resp->location[0] == '/') {
-            int dp = (strcmp(u.scheme, "https") == 0) ? 443 : 80;
-            new_url = (char *)malloc(strlen(u.scheme) + 3 +
-                                     strlen(u.host) + 8 + strlen(resp->location) + 1);
-            if (u.port == dp)
-                sprintf(new_url, "%s://%s%s", u.scheme, u.host, resp->location);
-            else
-                sprintf(new_url, "%s://%s:%d%s", u.scheme, u.host, u.port, resp->location);
-        } else {
-            new_url = strdup(resp->location);
-        }
+        char *new_url = redirect_url(&u, resp->location);
+        if (!new_url) { http_response_free(resp); return -1; }
         http_response_free(resp);
         rc = do_http_get(new_url, resp, depth + 1);
         free(new_url);
@@ -721,6 +748,7 @@ static int do_http_download(const char *url, const char *dest_path,
     while (in_headers) {
         n = conn_recv(c, buf, sizeof(buf));
         if (n <= 0) break;
+        if (hdr_len + n > 65536) { free(hdr_buf); conn_close(c); return -1; }
         if (hdr_len + n >= hdr_alloc) {
             hdr_alloc = (hdr_len + n) * 2;
             hdr_buf = (char *)realloc(hdr_buf, hdr_alloc);
@@ -747,22 +775,12 @@ static int do_http_download(const char *url, const char *dest_path,
         if (!sp) { free(hdr_buf); conn_close(c); return -1; }
         status = atoi(sp + 1);
 
-        if (status == 301 || status == 302 || status == 303 || status == 307) {
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
             char *loc = extract_header(hdr_buf, body_start - hdr_buf, "Location");
             if (loc) {
-                char *new_url;
-                if (loc[0] == '/') {
-                    int dp = (strcmp(u.scheme, "https") == 0) ? 443 : 80;
-                    new_url = (char *)malloc(strlen(u.scheme) + 3 +
-                                             strlen(u.host) + 8 + strlen(loc) + 1);
-                    if (u.port == dp)
-                        sprintf(new_url, "%s://%s%s", u.scheme, u.host, loc);
-                    else
-                        sprintf(new_url, "%s://%s:%d%s", u.scheme, u.host, u.port, loc);
-                } else {
-                    new_url = strdup(loc);
-                }
+                char *new_url = redirect_url(&u, loc);
                 free(loc); free(hdr_buf); conn_close(c);
+                if (!new_url) return -1;
                 n = do_http_download(new_url, dest_path, progress_cb, depth + 1);
                 free(new_url);
                 return n;
@@ -813,7 +831,7 @@ static int do_http_download(const char *url, const char *dest_path,
     conn_close(c);
     close(out_fd);
 
-    if (content_length > 0 && total_recv < content_length) {
+    if (n < 0 || (content_length >= 0 && total_recv != content_length)) {
         fprintf(stderr, "spm: incomplete download (%ld/%ld bytes)\n",
                 total_recv, content_length);
         unlink(dest_path);
