@@ -301,6 +301,20 @@ void pkgdb_add_github(pkgdb_t *db, const char *json_body,
                     strncpy(pkg.name, gh_repo, sizeof(pkg.name) - 1);
             }
 
+            /* The canonical SST suffix delimits the complete upstream+REV
+             * identity, including prerelease hyphens and letter versions. */
+            if (strncmp(pkg.pkg_code, "SST", 3) == 0) {
+                const char *end = strstr(aname, ".sst-sunos5.7-sparc.pkg");
+                const char *start = aname + strlen(pkg.pkg_code);
+                if (end && *start == '-' && end > start + 1) {
+                    size_t length = (size_t)(end - ++start);
+                    if (length < sizeof(pkg.version)) {
+                        memcpy(pkg.version, start, length);
+                        pkg.version[length] = '\0';
+                    }
+                }
+            }
+
             /* Per-package description when name was extracted from
              * filename (avoids all sunstorm assets sharing one desc) */
             if (pkg.name[0] && pkg.version[0]) {
@@ -407,6 +421,43 @@ int pkgdb_load_index(pkgdb_t *db)
 
     fclose(f);
     return 0;
+}
+
+/* Match native SST VERSION metadata to the revision-bearing release filename.
+ * Keep the complete upstream version; REV defaults to the writer's value 1.
+ * Other namespaces retain their existing version conventions. */
+static void normalize_sst_pkginfo_version(char *version, size_t size)
+{
+    char input[128], normalized[128];
+    char *upstream, *field, *next, *revision = NULL;
+    size_t length;
+    int written;
+    if (strlen(version) >= sizeof(input)) return;
+    strcpy(input, version);
+    upstream = input;
+    length = strlen(upstream);
+    if (length >= 2 && (upstream[0] == '\"' || upstream[0] == '\'')) {
+        if (upstream[length - 1] != upstream[0]) return;
+        upstream[length - 1] = '\0';
+        upstream++;
+    }
+    field = strchr(upstream, ',');
+    if (field) *field++ = '\0';
+    while (field) {
+        next = strchr(field, ',');
+        if (next) *next++ = '\0';
+        if (strncmp(field, "REV=", 4) == 0) {
+            if (revision) return;
+            revision = field + 4;
+        }
+        field = next;
+    }
+    if (!revision) revision = "1";
+    if (!spm_safe_component(upstream) || !spm_safe_component(revision)) return;
+    written = snprintf(normalized, sizeof(normalized), "%s-%s", upstream, revision);
+    if (written < 0 || written >= (int)sizeof(normalized) || written >= (int)size)
+        return;
+    strcpy(version, normalized);
 }
 
 int pkgdb_save_installed(const pkgdb_t *db)
@@ -533,6 +584,8 @@ int pkgdb_load_installed(pkgdb_t *db)
             fclose(fp);
         }
 
+        if (strncmp(pkg.pkg_code, "SST", 3) == 0)
+            normalize_sst_pkginfo_version(pkg.version, sizeof(pkg.version));
         add_installed(db, &pkg);
     }
 
@@ -711,6 +764,9 @@ int pkgdb_load_spool(pkgdb_t *db, const char *spool_dir)
             }
             fclose(fp);
         }
+
+        if (strncmp(pkg.pkg_code, "SST", 3) == 0)
+            normalize_sst_pkginfo_version(pkg.version, sizeof(pkg.version));
 
         /* Don't add if already in available index */
         if (pkgdb_find_by_code(db, pkg.pkg_code) < 0) {

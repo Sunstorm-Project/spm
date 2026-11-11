@@ -85,6 +85,13 @@ int main(int argc, char **argv) {
     strcpy(available[1].filename, "SSTdemo-2.0.pkg"); strcpy(available[1].md5, "NEW_HASH");
     strcpy(installed[0].name, "display name with spaces"); strcpy(installed[0].version, "1.0,REV=1");
     strcpy(installed[0].pkg_code, "SSTdemo");
+    if (strcmp(argv[2], "revision-upgrade-rollback") == 0) {
+        strcpy(available[0].version, "1.0-1");
+        strcpy(available[0].filename, "SSTdemo-1.0-1.sst-sunos5.7-sparc.pkg");
+        strcpy(available[1].version, "1.0-2");
+        strcpy(available[1].filename, "SSTdemo-1.0-2.sst-sunos5.7-sparc.pkg");
+        strcpy(installed[0].version, "1.0-1");
+    }
     db.available = available; db.avail_count = 2; db.installed = installed; db.inst_count = 1;
     snprintf(oldpath, sizeof(oldpath), "%s/%s", cache_directory, available[0].filename); put(oldpath, "abc");
     snprintf(journal, sizeof(journal), "%s/SSTdemo.previous", history_directory);
@@ -121,7 +128,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[2], "corrupt-rollback") == 0 || strcmp(argv[2], "stale-history") == 0 || strcmp(argv[2], "malformed-history") == 0)
         return rc != 0 && adds == before && removes == 0 && records == 1 ? 0 : 8;
     if (fail_add) return rc != 0 && removes == 0 && records == 1 && access(journal, F_OK) == 0 ? 0 : 9;
-    return rc == 0 && records == 2 && removes == 0 && strcmp(installed[0].version, "1.0") == 0 && access(journal, F_OK) != 0 ? 0 : 10;
+    return rc == 0 && records == 2 && removes == 0 && strcmp(installed[0].version, available[0].version) == 0 && access(journal, F_OK) != 0 ? 0 : 10;
 }
 '''
         main = main.replace('OLD_HASH', hashlib.sha256(b'abc').hexdigest()).replace('NEW_HASH', hashlib.sha256(b'xyz').hexdigest())
@@ -133,7 +140,7 @@ int main(int argc, char **argv) {
         subprocess.run(command, check=True)
 
     def test_operations(self):
-        for scenario in ['upgrade-rollback', 'remove-failure', 'unsafe-remove', 'legacy-rollback',
+        for scenario in ['upgrade-rollback', 'revision-upgrade-rollback', 'remove-failure', 'unsafe-remove', 'legacy-rollback',
                          'unpack-failure', 'gzip-fallback', 'compress-success', 'install-failure',
                          'corrupt-rollback', 'stale-history', 'rollback-failure', 'malformed-history']:
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
