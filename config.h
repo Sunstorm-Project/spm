@@ -10,6 +10,7 @@
 
 #define SPM_VERSION   "0.1.0"
 #define SPM_BASE      "/opt/sst"
+#define SPM_CLI       SPM_BASE "/bin/spm"
 #define SPM_ETC       SPM_BASE "/etc"
 #define SPM_VAR       SPM_BASE "/var"
 #define SPM_CACHE     SPM_VAR  "/cache"

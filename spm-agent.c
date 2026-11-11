@@ -225,9 +225,16 @@ static int check_for_updates(void)
      * we use the same code paths as the CLI. */
     {
         int ret;
-        ret = system("spm update >/dev/null 2>&1");
+        ret = system(SPM_CLI " update >/dev/null 2>&1");
         if (ret != 0) {
-            agent_log("update command failed (exit %d)", ret);
+            if (ret == -1)
+                agent_log("cannot start update command: %s", strerror(errno));
+            else if (WIFEXITED(ret))
+                agent_log("update command failed (exit %d)", WEXITSTATUS(ret));
+            else if (WIFSIGNALED(ret))
+                agent_log("update command terminated by signal %d", WTERMSIG(ret));
+            else
+                agent_log("update command failed (wait status %d)", ret);
             pkgdb_free(db);
             return -1;
         }
