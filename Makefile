@@ -2,23 +2,19 @@
 #
 # Sunstorm Package Manager for Solaris 7 SPARC.
 # Uses OpenSSL loaded at runtime via dlopen for HTTPS.
-# Search order: Sunstorm (/opt/sst/lib), TGCware, then system.
+# Loads the package-owned OpenSSL3 runtime from /opt/sst/lib.
 #
 # Builds three targets:
 #   spm       - CLI package manager
 #   spm-gui   - Motif/CDE graphical package manager
 #   spm-agent - Background update check daemon
 #
-# Requires: OpenSSL (Sunstorm SSTossl or TGCware, loaded at runtime)
+# Requires: OpenSSL3 (Sunstorm SSTossl, loaded at runtime)
 #           Solaris socket/dl libs (-lsocket -lnsl -ldl)
 #           Motif/CDE (for GUI: -lXm -lXt -lX11)
 
-# Use tgcware GCC if available, fall back to system cc
-CC = /usr/tgcware/gcc47/bin/gcc
-#CC = cc
-
-# TGCware paths for OpenSSL headers and libs
-TGCWARE = /usr/tgcware
+# Use the canonical compiler; cross builds override CC on the make command line.
+CC = gcc
 
 # Sunstorm install prefix
 SSTDIR = /opt/sst
@@ -27,8 +23,8 @@ SSTDIR = /opt/sst
 MOTIFDIR = /usr/dt
 OPENWINDIR = /usr/openwin
 
-CFLAGS = -O2 -Wall -D_REENTRANT -I$(TGCWARE)/include -I$(SSTDIR)/include
-LDFLAGS = -s -L$(SSTDIR)/lib -Wl,-R,$(SSTDIR)/lib -L$(TGCWARE)/lib -Wl,-R,$(TGCWARE)/lib
+CFLAGS = -O2 -Wall -D_REENTRANT -I$(SSTDIR)/include
+LDFLAGS = -s -L$(SSTDIR)/lib -Wl,-R,$(SSTDIR)/lib
 LIBS = -lsolcompat -lsocket -lnsl -ldl
 
 # Motif/X11 link flags (GUI only)
@@ -110,7 +106,7 @@ install: all
 	chmod 755 $(PREFIX)/bin/spm-agent
 	@if [ ! -f $(PREFIX)/etc/repos.conf ]; then \
 		echo "Generating default config..."; \
-		$(PREFIX)/bin/spm --version >/dev/null 2>&1; \
+		cp repos.conf.example $(PREFIX)/etc/repos.conf; \
 	fi
 	@echo ""
 	@echo "Installing init.d script..."

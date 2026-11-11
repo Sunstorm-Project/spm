@@ -125,15 +125,12 @@ static int load_openssl(void)
     if (ssl_loaded) return 0;
 
     /* Load libcrypto first (libssl depends on it).
-     * Search order: Sunstorm (/opt/sst/lib), TGCware, then system. */
+     * Use the package-owned runtime instead of probing legacy installations. */
 #ifdef SPM_TEST_CRYPTO_LIBRARY
     crypto_lib_handle = dlopen(SPM_TEST_CRYPTO_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
 #else
-    crypto_lib_handle = dlopen("/opt/sst/lib/libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!crypto_lib_handle)
-        crypto_lib_handle = dlopen("/usr/tgcware/lib/libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!crypto_lib_handle)
-        crypto_lib_handle = dlopen("libcrypto.so", RTLD_NOW | RTLD_GLOBAL);
+    crypto_lib_handle = dlopen("/opt/sst/lib/libcrypto.so.3", RTLD_NOW | RTLD_GLOBAL);
+
 #endif
     if (!crypto_lib_handle) {
         fprintf(stderr, "spm: cannot load libcrypto: %s\n", dlerror());
@@ -143,11 +140,8 @@ static int load_openssl(void)
 #ifdef SPM_TEST_SSL_LIBRARY
     ssl_lib_handle = dlopen(SPM_TEST_SSL_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
 #else
-    ssl_lib_handle = dlopen("/opt/sst/lib/libssl.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!ssl_lib_handle)
-        ssl_lib_handle = dlopen("/usr/tgcware/lib/libssl.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!ssl_lib_handle)
-        ssl_lib_handle = dlopen("libssl.so", RTLD_NOW | RTLD_GLOBAL);
+    ssl_lib_handle = dlopen("/opt/sst/lib/libssl.so.3", RTLD_NOW | RTLD_GLOBAL);
+
 #endif
     if (!ssl_lib_handle) {
         fprintf(stderr, "spm: cannot load libssl: %s\n", dlerror());
@@ -209,8 +203,7 @@ static int load_openssl(void)
 
 /* Global SSL context */
 static SSL_CTX *g_ssl_ctx = NULL;
-static int g_ca_explicit = 0;
-static char g_ca_bundle[512] = "/opt/sst/etc/ssl/certs/ca-bundle.crt";
+static char g_ca_bundle[512] = SPM_CA_BUNDLE;
 
 /* ================================================================
  * SSL INIT / SHUTDOWN
@@ -246,11 +239,7 @@ int http_init(void)
                     SPM_SSL_OP_NO_SSLv2 | SPM_SSL_OP_NO_SSLv3, NULL);
 
     /* An explicitly configured trust store must work as configured. */
-    if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, g_ca_bundle, NULL) != 1 &&
-        (g_ca_explicit ||
-         (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/usr/tgcware/etc/curl-ca-bundle.pem", NULL) != 1 &&
-          dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/usr/tgcware/share/curl/curl-ca-bundle.crt", NULL) != 1 &&
-          dl_SSL_CTX_load_verify_locations(g_ssl_ctx, "/etc/ssl/certs/ca-certificates.crt", NULL) != 1))) {
+    if (dl_SSL_CTX_load_verify_locations(g_ssl_ctx, g_ca_bundle, NULL) != 1) {
         fprintf(stderr, "spm: cannot load trusted CA certificates: %s\n", g_ca_bundle);
         dl_SSL_CTX_free(g_ssl_ctx);
         g_ssl_ctx = NULL;
@@ -278,7 +267,6 @@ void http_set_ca_bundle(const char *path)
 {
     if (path) {
         if (g_ssl_ctx) { dl_SSL_CTX_free(g_ssl_ctx); g_ssl_ctx = NULL; }
-        g_ca_explicit = 1;
         strncpy(g_ca_bundle, path, sizeof(g_ca_bundle) - 1);
         g_ca_bundle[sizeof(g_ca_bundle) - 1] = '\0';
     }

@@ -4,14 +4,7 @@
  * INI-style config parser for repos.conf:
  *
  *   [ssl]
- *   ca_bundle = /usr/tgcware/etc/curl-ca-bundle.pem
- *
- *   [repo:tgcware]
- *   type = tgcware
- *   name = TGCware Solaris 7 SPARC
- *   url = https://jupiterrise.com/tgcware/sunos5.7_sparc/stable/
- *   source = https://github.com/AstroVPK/tgcwarev2-for-solaris
- *   enabled = yes
+ *   ca_bundle = /opt/sst/etc/ssl/cert.pem
  *
  *   [repo:firefly128]
  *   type = github
@@ -85,50 +78,34 @@ void config_defaults(spm_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
 
-    /* Default CA bundle: prefer Sunstorm OpenSSL, fall back to TGCware */
-    {
-        struct stat _st;
-        if (stat(SPM_CA_BUNDLE_ALT, &_st) == 0)
-            strcpy(cfg->ca_bundle, SPM_CA_BUNDLE_ALT);
-        else
-            strcpy(cfg->ca_bundle, SPM_CA_BUNDLE);
-    }
+    /* Use the package-owned trust store independently of host filesystem state. */
+    strcpy(cfg->ca_bundle, SPM_CA_BUNDLE);
 
     /* Agent defaults */
     cfg->agent_interval = AGENT_DEFAULT_INTERVAL;
     cfg->agent_notify = 1;
 
-    /* TGCware repo */
-    cfg->repos[0].type = REPO_TYPE_TGCWARE;
-    cfg->repos[0].enabled = 1;
-    strcpy(cfg->repos[0].name, "tgcware");
-    strcpy(cfg->repos[0].display_name, "TGCware Solaris 7 SPARC");
-    strcpy(cfg->repos[0].url,
-           "https://jupiterrise.com/tgcware/sunos5.7_sparc/stable/");
-    strcpy(cfg->repos[0].source_url,
-           "https://github.com/AstroVPK/tgcwarev2-for-solaris");
-
     /* firefly128 GitHub releases */
-    cfg->repos[1].type = REPO_TYPE_GITHUB;
-    cfg->repos[1].enabled = 1;
-    strcpy(cfg->repos[1].name, "firefly128");
-    strcpy(cfg->repos[1].display_name, "firefly128 SPARC Apps");
-    strcpy(cfg->repos[1].owner, "firefly128");
-    strcpy(cfg->repos[1].repos[0], "pizzafool");
-    strcpy(cfg->repos[1].repos[1], "sparccord");
-    strcpy(cfg->repos[1].repos[2], "wesnoth-sparc");
-    cfg->repos[1].repo_count = 3;
+    cfg->repos[0].type = REPO_TYPE_GITHUB;
+    cfg->repos[0].enabled = 1;
+    strcpy(cfg->repos[0].name, "firefly128");
+    strcpy(cfg->repos[0].display_name, "firefly128 SPARC Apps");
+    strcpy(cfg->repos[0].owner, "firefly128");
+    strcpy(cfg->repos[0].repos[0], "pizzafool");
+    strcpy(cfg->repos[0].repos[1], "sparccord");
+    strcpy(cfg->repos[0].repos[2], "wesnoth-sparc");
+    cfg->repos[0].repo_count = 3;
 
     /* Sunstorm distribution packages */
-    cfg->repos[2].type = REPO_TYPE_GITHUB;
-    cfg->repos[2].enabled = 1;
-    strcpy(cfg->repos[2].name, "sunstorm");
-    strcpy(cfg->repos[2].display_name, "Sunstorm Distribution");
-    strcpy(cfg->repos[2].owner, "firefly128");
-    strcpy(cfg->repos[2].repos[0], "sunstorm");
-    cfg->repos[2].repo_count = 1;
+    cfg->repos[1].type = REPO_TYPE_GITHUB;
+    cfg->repos[1].enabled = 1;
+    strcpy(cfg->repos[1].name, "sunstorm");
+    strcpy(cfg->repos[1].display_name, "Sunstorm Distribution");
+    strcpy(cfg->repos[1].owner, "Sunstorm-Project");
+    strcpy(cfg->repos[1].repos[0], "sunstorm");
+    cfg->repos[1].repo_count = 1;
 
-    cfg->repo_count = 3;
+    cfg->repo_count = 2;
 }
 
 int config_load(spm_config_t *cfg)

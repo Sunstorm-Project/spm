@@ -17,7 +17,7 @@ HTTPS now requires OpenSSL's certificate hostname/IP verification APIs
 (available in OpenSSL 1.0.2 and later). Libraries missing the APIs are
 rejected; OpenSSL 3.x is the intended deployment. An explicitly configured
 CA bundle must load successfully; it does not silently fall back to a
-different store. Default-store searches remain supported and fail closed.
+different store. The default is the package-owned SST bundle; it also fails closed without fallback to a different store.
 
 Transport continues to support initially configured HTTP repositories for
 legacy compatibility. HTTPS cannot redirect to HTTP. The existing IPv4
