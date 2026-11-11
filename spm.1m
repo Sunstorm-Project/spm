@@ -2,7 +2,7 @@
 .\" Copyright (c) 2025 Julian Wolfe
 .TH SPM 1M "June 2025" "spm 0.1.0" "System Administration Commands"
 .SH NAME
-spm \- Sunstorm Package Manager for TGCware and GitHub repositories
+spm \- Sunstorm Package Manager for configured package repositories
 .SH SYNOPSIS
 .B spm
 .IR command
@@ -14,7 +14,7 @@ spm \- Sunstorm Package Manager for TGCware and GitHub repositories
 .SH DESCRIPTION
 .B spm
 is a package manager for Solaris 7 SPARC systems that indexes and installs
-packages from TGCware and GitHub release repositories. It handles package
+packages from configured GitHub release and legacy index repositories. It handles package
 downloads over HTTPS (via native OpenSSL), automatic dependency resolution,
 and SVR4 package installation via
 .BR pkgadd (1M).
@@ -32,7 +32,7 @@ available updates and notifies the user via CDE.
 .TP
 .B update
 Refresh the package index from all enabled repositories. Downloads the
-latest package lists from TGCware and GitHub and saves them locally.
+latest package lists from configured repositories and saves them locally.
 .TP
 .BI search " term"
 Search available packages by name, description, or package code.
@@ -89,7 +89,7 @@ Display version and exit.
 .SH FILES
 .TP
 .I /opt/sst/etc/repos.conf
-Repository configuration file. Defines TGCware and GitHub repository
+Repository configuration file. Defines package repository
 sources, SSL settings, and agent parameters.
 .TP
 .I /opt/sst/var/index/available.idx
@@ -107,7 +107,7 @@ Backup files for package rollback.
 .I /opt/sst/var/admin
 Non-interactive admin file for pkgadd(1M).
 .TP
-.I /usr/tgcware/etc/curl-ca-bundle.pem
+.I /opt/sst/etc/ssl/cert.pem
 CA certificate bundle used for HTTPS connections.
 .SH ENVIRONMENT
 .TP

@@ -1,6 +1,6 @@
 # spm — Sunstorm Package Manager
 
-A package manager for Solaris 7 SPARC. Aggregates packages from multiple sources — the [Sunstorm](https://github.com/firefly128/sunstorm) distribution and [TGCware](https://jupiterrise.com/tgcware/sunos5.7_sparc/stable/) — and installs them via the native SVR4 `pkgadd`/`pkgrm` tools.
+A package manager for Solaris 7 SPARC. Aggregates packages from the [Sunstorm](https://github.com/Sunstorm-Project/sunstorm) distribution and configured GitHub releases, and installs them via the native SVR4 `pkgadd`/`pkgrm` tools.
 
 Public repo: github.com/firefly128/spm — v1.0.0 released.
 
@@ -121,23 +121,16 @@ kill -USR1 $(cat /opt/sst/var/agent.pid)
 
 ```ini
 [ssl]
-ca_bundle = /opt/sst/etc/ssl/certs/ca-bundle.crt
+ca_bundle = /opt/sst/etc/ssl/cert.pem
 
 [agent]
 interval = 21600
 notify = yes
 
-[repo:tgcware]
-type = tgcware
-name = TGCware Solaris 7 SPARC
-url = https://jupiterrise.com/tgcware/sunos5.7_sparc/stable/
-source = https://github.com/AstroVPK/tgcwarev2-for-solaris
-enabled = yes
-
 [repo:sunstorm]
 type = github
 name = Sunstorm Distribution
-owner = firefly128
+owner = Sunstorm-Project
 repos = sunstorm
 enabled = yes
 ```
@@ -161,7 +154,7 @@ When you run `spm install curl`, spm:
 
 ## SSL / HTTPS
 
-spm uses OpenSSL loaded at runtime via `dlopen`. It searches for `libssl.so` and `libcrypto.so` in `/opt/sst/lib` (Sunstorm) first, then `/usr/tgcware/lib` (TGCware), then the system library path. CA certificates come from `/opt/sst/etc/ssl/certs/ca-bundle.crt`.
+spm loads the package-owned OpenSSL3 libraries from `/opt/sst/lib` via `dlopen`. CA certificates come from `/opt/sst/etc/ssl/cert.pem`; an explicitly configured alternate bundle must load successfully. There is no fallback to legacy installation paths or an unrelated trust store.
 
 ## Directory Layout
 

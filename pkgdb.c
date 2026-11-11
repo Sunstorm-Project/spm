@@ -8,6 +8,9 @@
 
 #include "pkgdb.h"
 #include "http.h"
+#include "integrity.h"
+#include "process.h"
+#include <fcntl.h>
 #include "json.h"
 
 #include <stdio.h>
@@ -298,6 +301,20 @@ void pkgdb_add_github(pkgdb_t *db, const char *json_body,
                     strncpy(pkg.name, gh_repo, sizeof(pkg.name) - 1);
             }
 
+            /* The canonical SST suffix delimits the complete upstream+REV
+             * identity, including prerelease hyphens and letter versions. */
+            if (strncmp(pkg.pkg_code, "SST", 3) == 0) {
+                const char *end = strstr(aname, ".sst-sunos5.7-sparc.pkg");
+                const char *start = aname + strlen(pkg.pkg_code);
+                if (end && *start == '-' && end > start + 1) {
+                    size_t length = (size_t)(end - ++start);
+                    if (length < sizeof(pkg.version)) {
+                        memcpy(pkg.version, start, length);
+                        pkg.version[length] = '\0';
+                    }
+                }
+            }
+
             /* Per-package description when name was extracted from
              * filename (avoids all sunstorm assets sharing one desc) */
             if (pkg.name[0] && pkg.version[0]) {
@@ -406,23 +423,63 @@ int pkgdb_load_index(pkgdb_t *db)
     return 0;
 }
 
+/* Match native SST VERSION metadata to the revision-bearing release filename.
+ * Keep the complete upstream version; REV defaults to the writer's value 1.
+ * Other namespaces retain their existing version conventions. */
+static void normalize_sst_pkginfo_version(char *version, size_t size)
+{
+    char input[128], normalized[128];
+    char *upstream, *field, *next, *revision = NULL;
+    size_t length;
+    int written;
+    if (strlen(version) >= sizeof(input)) return;
+    strcpy(input, version);
+    upstream = input;
+    length = strlen(upstream);
+    if (length >= 2 && (upstream[0] == '\"' || upstream[0] == '\'')) {
+        if (upstream[length - 1] != upstream[0]) return;
+        upstream[length - 1] = '\0';
+        upstream++;
+    }
+    field = strchr(upstream, ',');
+    if (field) *field++ = '\0';
+    while (field) {
+        next = strchr(field, ',');
+        if (next) *next++ = '\0';
+        if (strncmp(field, "REV=", 4) == 0) {
+            if (revision) return;
+            revision = field + 4;
+        }
+        field = next;
+    }
+    if (!revision) revision = "1";
+    if (!spm_safe_component(upstream) || !spm_safe_component(revision)) return;
+    written = snprintf(normalized, sizeof(normalized), "%s-%s", upstream, revision);
+    if (written < 0 || written >= (int)sizeof(normalized) || written >= (int)size)
+        return;
+    strcpy(version, normalized);
+}
+
 int pkgdb_save_installed(const pkgdb_t *db)
 {
     FILE *f;
-    int i;
-
-    f = fopen(SPM_INSTALLED, "w");
-    if (!f) return -1;
-
-    fprintf(f, "# spm installed packages\n");
+    char temporary[512];
+    int i, fd, error = 0;
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp-XXXXXX", SPM_INSTALLED) >= (int)sizeof(temporary)) return -1;
+    fd = mkstemp(temporary);
+    if (fd < 0) return -1;
+    f = fdopen(fd, "w");
+    if (!f) { close(fd); unlink(temporary); return -1; }
+    if (fprintf(f, "# spm installed packages\n") < 0) error = 1;
     for (i = 0; i < db->inst_count; i++) {
         const installed_pkg_t *p = &db->installed[i];
-        fprintf(f, "%s|%s|%s|%s|%s|%s|%d\n",
-                p->name, p->version, p->pkg_code, p->repo_name,
-                p->install_date, p->pkg_file, p->source_type);
+        if (fprintf(f, "%s|%s|%s|%s|%s|%s|%d\n",
+                    p->name, p->version, p->pkg_code, p->repo_name,
+                    p->install_date, p->pkg_file, p->source_type) < 0) error = 1;
     }
-
-    fclose(f);
+    if (fflush(f) != 0 || fsync(fd) != 0) error = 1;
+    if (fclose(f) != 0) error = 1;
+    if (error || rename(temporary, SPM_INSTALLED) != 0) { unlink(temporary); return -1; }
     return 0;
 }
 
@@ -527,6 +584,8 @@ int pkgdb_load_installed(pkgdb_t *db)
             fclose(fp);
         }
 
+        if (strncmp(pkg.pkg_code, "SST", 3) == 0)
+            normalize_sst_pkginfo_version(pkg.version, sizeof(pkg.version));
         add_installed(db, &pkg);
     }
 
@@ -706,6 +765,9 @@ int pkgdb_load_spool(pkgdb_t *db, const char *spool_dir)
             fclose(fp);
         }
 
+        if (strncmp(pkg.pkg_code, "SST", 3) == 0)
+            normalize_sst_pkginfo_version(pkg.version, sizeof(pkg.version));
+
         /* Don't add if already in available index */
         if (pkgdb_find_by_code(db, pkg.pkg_code) < 0) {
             add_avail(db, &pkg);
@@ -824,40 +886,185 @@ static void download_progress(long current, long total)
  * ADMIN FILE FOR NON-INTERACTIVE PKGADD
  * ================================================================ */
 
+static char admin_path[512];
+static void cleanup_admin(void)
+{
+    if (admin_path[0]) { unlink(admin_path); admin_path[0] = '\0'; }
+}
+
 static const char *pkgadd_admin_file(void)
 {
-    static char admin_path[256] = "";
     FILE *f;
-
+    int fd;
     if (admin_path[0]) return admin_path;
-
-    snprintf(admin_path, sizeof(admin_path), "%s/admin", SPM_VAR);
-    f = fopen(admin_path, "w");
-    if (!f) {
-        /* fallback: use /tmp */
-        snprintf(admin_path, sizeof(admin_path), "/tmp/spm-admin");
-        f = fopen(admin_path, "w");
+    if (snprintf(admin_path, sizeof(admin_path), "%s/admin-XXXXXX", SPM_VAR) >= (int)sizeof(admin_path)) return NULL;
+    fd = mkstemp(admin_path);
+    if (fd < 0) { admin_path[0] = '\0'; return NULL; }
+    f = fdopen(fd, "w");
+    if (!f) { close(fd); cleanup_admin(); return NULL; }
+    if (fprintf(f, "mail=\ninstance=overwrite\npartial=nocheck\nrunlevel=nocheck\n"
+                   "idepend=nocheck\nrdepend=nocheck\nspace=nocheck\nsetuid=nocheck\n"
+                   "conflict=nocheck\naction=nocheck\nbasedir=default\n") < 0) {
+        fclose(f); cleanup_admin(); return NULL;
     }
-    if (f) {
-        fprintf(f, "mail=\n");
-        fprintf(f, "instance=overwrite\n");
-        fprintf(f, "partial=nocheck\n");
-        fprintf(f, "runlevel=nocheck\n");
-        fprintf(f, "idepend=nocheck\n");
-        fprintf(f, "rdepend=nocheck\n");
-        fprintf(f, "space=nocheck\n");
-        fprintf(f, "setuid=nocheck\n");
-        fprintf(f, "conflict=nocheck\n");
-        fprintf(f, "action=nocheck\n");
-        fprintf(f, "basedir=default\n");
-        fclose(f);
-    }
+    if (fclose(f) != 0) { cleanup_admin(); return NULL; }
+    if (atexit(cleanup_admin) != 0) { cleanup_admin(); return NULL; }
     return admin_path;
+}
+
+/* Decompress completely before invoking pkgadd. No shell or prior pkgrm. */
+static int install_cached(const char *path, const char *filename)
+{
+    char temporary[512];
+    const char *input = path, *admin;
+    size_t length = strlen(filename);
+    int fd = -1, rc = -1, compressed = 0;
+    struct stat st;
+    char *arguments[9];
+    temporary[0] = '\0';
+    if (length > 6 && strcmp(filename + length - 6, ".pkg.Z") == 0) compressed = 1;
+    else if (length > 3 && strcmp(filename + length - 3, ".gz") == 0) compressed = 2;
+    else if (length < 4 || strcmp(filename + length - 4, ".pkg") != 0) return -1;
+    if (compressed) {
+        if (snprintf(temporary, sizeof(temporary), "%s/.unpack-XXXXXX", SPM_CACHE) >= (int)sizeof(temporary)) return -1;
+        fd = mkstemp(temporary);
+        if (fd < 0) return -1;
+        arguments[0] = compressed == 1 ? "/usr/bin/uncompress" : "/opt/sst/bin/gzip";
+        arguments[1] = compressed == 1 ? "-c" : "-dc";
+        arguments[2] = (char *)path; arguments[3] = NULL;
+        rc = spm_run(arguments, fd);
+        if (rc && compressed == 2) {
+            if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0) { rc = -1; goto done; }
+            arguments[0] = "/usr/bin/gzip";
+            rc = spm_run(arguments, fd);
+        }
+        if (rc && compressed == 2) {
+            if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0) { rc = -1; goto done; }
+            arguments[0] = "/usr/tgcware/bin/gzip";
+            rc = spm_run(arguments, fd);
+        }
+        if (rc || fstat(fd, &st) != 0 || st.st_size <= 0) { rc = -1; goto done; }
+        if (close(fd) != 0) { fd = -1; rc = -1; goto done; }
+        fd = -1; input = temporary;
+    }
+    admin = pkgadd_admin_file();
+    if (!admin) { rc = -1; goto done; }
+    arguments[0] = "/usr/sbin/pkgadd"; arguments[1] = "-n";
+    arguments[2] = "-a"; arguments[3] = (char *)admin;
+    arguments[4] = "-d"; arguments[5] = (char *)input;
+    arguments[6] = "all"; arguments[7] = NULL;
+    rc = spm_run(arguments, -1);
+done:
+    if (fd >= 0) close(fd);
+    if (temporary[0]) unlink(temporary);
+    return rc;
 }
 
 /* ================================================================
  * INSTALL PACKAGE
  * ================================================================ */
+
+/* One verified previous package per code. Legacy cache paths are not history. */
+static int version_matches(const char *a, const char *b)
+{
+    size_t alen, blen;
+    if (*a == '"') a++;
+    if (*b == '"') b++;
+    alen = strcspn(a, ",\""); blen = strcspn(b, ",\"");
+    return alen > 0 && alen == blen && strncmp(a, b, alen) == 0;
+}
+
+static int history_path(const char *code, char *path, size_t size)
+{
+    if (!spm_safe_component(code)) return -1;
+    return snprintf(path, size, "%s/%s.previous", SPM_ROLLBACK, code) >= (int)size ? -1 : 0;
+}
+
+static int previous_candidate(const pkgdb_t *db, const avail_pkg_t *next, avail_pkg_t *previous)
+{
+    int i, j;
+    char path[512];
+    for (i = 0; i < db->inst_count; i++) {
+        const installed_pkg_t *installed = &db->installed[i];
+        if (strcmp(installed->pkg_code, next->pkg_code) != 0 ||
+            version_matches(installed->version, next->version)) continue;
+        for (j = 0; j < db->avail_count; j++) {
+            const avail_pkg_t *old = &db->available[j];
+            if (strcmp(old->pkg_code, installed->pkg_code) != 0 ||
+                !version_matches(installed->version, old->version) ||
+                !spm_safe_component(old->name) || !spm_safe_component(old->version) ||
+                !spm_safe_component(old->filename) || !spm_safe_component(old->repo_name) ||
+                (old->source_type != SRC_GITHUB && old->source_type != SRC_TGCWARE)) continue;
+            if (snprintf(path, sizeof(path), "%s/%s", SPM_CACHE, old->filename) >= (int)sizeof(path)) continue;
+            if (spm_verify_file(path, old->md5, old->source_type == SRC_GITHUB) != 0) continue;
+            *previous = *old;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int save_history(const avail_pkg_t *current, const avail_pkg_t *previous)
+{
+    char path[512], temporary[512];
+    int fd, error;
+    FILE *file;
+    if (history_path(current->pkg_code, path, sizeof(path)) != 0) return -1;
+    if (!previous) {
+        if (unlink(path) != 0 && errno != ENOENT) return -1;
+        return 0;
+    }
+    if (snprintf(temporary, sizeof(temporary), "%s/.history-XXXXXX", SPM_ROLLBACK) >= (int)sizeof(temporary)) return -1;
+    fd = mkstemp(temporary);
+    if (fd < 0) return -1;
+    file = fdopen(fd, "w");
+    if (!file) { close(fd); unlink(temporary); return -1; }
+    error = fprintf(file, "%s|%s|%s|%s|%s|%d|%s|%s\n", current->version,
+                    previous->name, previous->version, previous->filename, previous->md5,
+                    previous->source_type, previous->repo_name, previous->pkg_code) < 0;
+    if (fflush(file) != 0 || fsync(fd) != 0) error = 1;
+    if (fclose(file) != 0) error = 1;
+    if (error || rename(temporary, path) != 0) { unlink(temporary); return -1; }
+    return 0;
+}
+
+static int load_history(const installed_pkg_t *current, avail_pkg_t *previous, char *journal, size_t size)
+{
+    char line[2048], *fields[8], *cursor;
+    struct stat st;
+    FILE *file;
+    int i;
+    if (history_path(current->pkg_code, journal, size) != 0 ||
+        lstat(journal, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    file = fopen(journal, "r");
+    if (!file) return -1;
+    if (!fgets(line, sizeof(line), file) || !strchr(line, '\n')) { fclose(file); return -1; }
+    if (fgetc(file) != EOF || ferror(file)) { fclose(file); return -1; }
+    fclose(file);
+    line[strcspn(line, "\r\n")] = '\0';
+    cursor = line;
+    for (i = 0; i < 8; i++) {
+        fields[i] = cursor;
+        cursor = strchr(cursor, '|');
+        if (i < 7) { if (!cursor) return -1; *cursor++ = '\0'; }
+        else if (cursor) return -1;
+    }
+    if (!version_matches(fields[0], current->version) ||
+        version_matches(fields[2], current->version) || strcmp(fields[7], current->pkg_code) != 0 ||
+        !spm_safe_component(fields[1]) || !spm_safe_component(fields[2]) ||
+        !spm_safe_component(fields[3]) || !spm_safe_component(fields[6]) ||
+        strlen(fields[1]) >= sizeof(previous->name) || strlen(fields[2]) >= sizeof(previous->version) ||
+        strlen(fields[3]) >= sizeof(previous->filename) || strlen(fields[4]) >= sizeof(previous->md5) ||
+        strlen(fields[6]) >= sizeof(previous->repo_name) || strlen(fields[7]) >= sizeof(previous->pkg_code)) return -1;
+    memset(previous, 0, sizeof(*previous));
+    strcpy(previous->name, fields[1]); strcpy(previous->version, fields[2]);
+    strcpy(previous->filename, fields[3]); strcpy(previous->md5, fields[4]);
+    strcpy(previous->repo_name, fields[6]); strcpy(previous->pkg_code, fields[7]);
+    if (strcmp(fields[5], "1") == 0) previous->source_type = SRC_TGCWARE;
+    else if (strcmp(fields[5], "2") == 0) previous->source_type = SRC_GITHUB;
+    else return -1;
+    return 0;
+}
 
 void pkgdb_record_install(pkgdb_t *db, const avail_pkg_t *pkg,
                            const char *pkg_file)
@@ -885,7 +1092,11 @@ void pkgdb_record_install(pkgdb_t *db, const avail_pkg_t *pkg,
 
     /* Remove existing entry for this package (upgrade path) */
     {
-        int ii = pkgdb_find_installed(db, pkg->name);
+        int ii;
+        for (ii = 0; ii < db->inst_count; ii++)
+            if (pkg->pkg_code[0] ? strcmp(db->installed[ii].pkg_code, pkg->pkg_code) == 0 :
+                strcmp(db->installed[ii].name, pkg->name) == 0) break;
+        if (ii == db->inst_count) ii = -1;
         if (ii >= 0) {
             /* Keep old .pkg file for rollback */
             memmove(&db->installed[ii], &db->installed[ii + 1],
@@ -895,15 +1106,16 @@ void pkgdb_record_install(pkgdb_t *db, const avail_pkg_t *pkg,
     }
 
     add_installed(db, &inst);
-    pkgdb_save_installed(db);
+    if (pkgdb_save_installed(db) != 0)
+        fprintf(stderr, "spm: package installed, but installed database could not be saved\n");
 }
 
 int pkgdb_install(pkgdb_t *db, int avail_idx)
 {
     const avail_pkg_t *pkg;
     char cache_path[512];
-    char cmd[1024];
-    int rc;
+    int rc, has_previous, i;
+    avail_pkg_t previous;
 
     if (avail_idx < 0 || avail_idx >= db->avail_count) return -1;
     pkg = &db->available[avail_idx];
@@ -911,118 +1123,63 @@ int pkgdb_install(pkgdb_t *db, int avail_idx)
     printf("Installing %s %s from %s...\n", pkg->name, pkg->version,
            pkg->repo_name);
 
-    /* Build cache path */
-    snprintf(cache_path, sizeof(cache_path), "%s/%s",
-             SPM_CACHE, pkg->filename);
-
-    /* Check if already cached */
+    /* Validate identities and constrain cache paths before package operations. */
+    if (!spm_safe_component(pkg->filename) || !spm_safe_component(pkg->name) ||
+        !spm_safe_component(pkg->version) ||
+        (pkg->pkg_code[0] && !spm_safe_component(pkg->pkg_code))) {
+        fprintf(stderr, "spm: invalid package filename or identity\n");
+        return -1;
+    }
+    if (snprintf(cache_path, sizeof(cache_path), "%s/%s",
+                 SPM_CACHE, pkg->filename) >= (int)sizeof(cache_path)) return -1;
     {
         struct stat st;
-        if (stat(cache_path, &st) == 0 && st.st_size > 0) {
-            printf("  Using cached %s\n", pkg->filename);
+        int require_sha256 = pkg->source_type == SRC_GITHUB;
+        if (lstat(cache_path, &st) == 0) {
+            if (spm_verify_file(cache_path, pkg->md5, require_sha256) != 0) {
+                fprintf(stderr, "spm: cached package rejected; refresh the index and remove the invalid cache file\n");
+                return -1;
+            }
+            printf("  Using verified cached %s\n", pkg->filename);
         } else {
+            char temporary[512];
+            int fd;
+            if (errno != ENOENT) return -1;
+            if (snprintf(temporary, sizeof(temporary), "%s/.download-XXXXXX",
+                         SPM_CACHE) >= (int)sizeof(temporary)) return -1;
+            fd = mkstemp(temporary);
+            if (fd < 0) return -1;
+            close(fd);
             printf("  Downloading %s (%s)...\n", pkg->filename, pkg->size_str);
-            if (http_download(pkg->download_url, cache_path,
-                              download_progress) < 0) {
-                fprintf(stderr, "\nspm: download failed: %s\n",
-                        pkg->download_url);
+            if (http_download(pkg->download_url, temporary, download_progress) < 0 ||
+                spm_verify_file(temporary, pkg->md5, require_sha256) != 0 ||
+                rename(temporary, cache_path) != 0) {
+                unlink(temporary);
+                fprintf(stderr, "spm: download or integrity verification failed\n");
                 return -1;
             }
             fprintf(stderr, "\n");
         }
     }
 
-    /* Determine decompression method from filename:
-     *   .pkg.Z  → uncompress (Sunstorm / classic SVR4)
-     *   .gz     → gzip -dc   (TGCware)
-     *   .pkg    → none       (bare datastream)
-     */
-    {
-        const char *fn = pkg->filename;
-        int fnlen = strlen(fn);
-        int needs_decompress = 0;
-        int use_compress = 0;  /* 1 = uncompress, 0 = gzip */
-
-        if (fnlen > 6 && strcmp(fn + fnlen - 6, ".pkg.Z") == 0) {
-            needs_decompress = 1;
-            use_compress = 1;
-        } else if (fnlen > 3 && strcmp(fn + fnlen - 3, ".gz") == 0) {
-            needs_decompress = 1;
-            use_compress = 0;
-        }
-
-        if (needs_decompress) {
-            char uncompressed[512];
-            snprintf(uncompressed, sizeof(uncompressed), "%s/%s.unpacked",
-                     SPM_CACHE, pkg->name);
-
-            printf("  Decompressing...\n");
-            if (use_compress) {
-                /* compress(1) / .Z files — use uncompress */
-                snprintf(cmd, sizeof(cmd),
-                         "/usr/bin/uncompress -c %s > %s 2>/dev/null",
-                         cache_path, uncompressed);
-                if (system(cmd) != 0) {
-                    fprintf(stderr, "spm: uncompress failed\n");
-                    return -1;
-                }
-            } else {
-                /* gzip / .gz files */
-                snprintf(cmd, sizeof(cmd),
-                         "/usr/bin/gzip -dc %s > %s 2>/dev/null",
-                         cache_path, uncompressed);
-                if (system(cmd) != 0) {
-                    snprintf(cmd, sizeof(cmd),
-                             "/usr/tgcware/bin/gzip -dc %s > %s 2>/dev/null",
-                             cache_path, uncompressed);
-                    if (system(cmd) != 0) {
-                        fprintf(stderr, "spm: decompression failed\n");
-                        return -1;
-                    }
-                }
+    has_previous = previous_candidate(db, pkg, &previous);
+    if (!has_previous) {
+        for (i = 0; i < db->inst_count; i++) {
+            if (strcmp(db->installed[i].pkg_code, pkg->pkg_code) == 0) {
+                fprintf(stderr, "spm: no verified previous artifact; rollback will be unavailable after this installation\n");
+                break;
             }
-
-            /* Backup current package for rollback if it's installed */
-            if (pkg->pkg_code[0] && pkgdb_sys_installed(pkg->pkg_code)) {
-                char backup[512];
-                snprintf(backup, sizeof(backup), "%s/%s-%s.bak",
-                         SPM_ROLLBACK, pkg->name, pkg->version);
-                snprintf(cmd, sizeof(cmd),
-                         "/usr/bin/pkgtrans -s /var/spool/pkg %s %s 2>/dev/null",
-                         backup, pkg->pkg_code);
-                system(cmd); /* best effort */
-            }
-
-            printf("  Running pkgadd...\n");
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgadd -n -a %s -d %s all 2>&1",
-                     pkgadd_admin_file(), uncompressed);
-            rc = system(cmd);
-            unlink(uncompressed);
-        } else {
-            /* Bare .pkg datastream — use directly */
-            if (pkg->pkg_code[0] && pkgdb_sys_installed(pkg->pkg_code)) {
-                char backup[512];
-                snprintf(backup, sizeof(backup), "%s/%s-%s.bak",
-                         SPM_ROLLBACK, pkg->name, pkg->version);
-                snprintf(cmd, sizeof(cmd),
-                         "/usr/bin/pkgtrans -s /var/spool/pkg %s %s 2>/dev/null",
-                         backup, pkg->pkg_code);
-                system(cmd);
-            }
-
-            printf("  Running pkgadd...\n");
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgadd -n -a %s -d %s all 2>&1",
-                     pkgadd_admin_file(), cache_path);
-            rc = system(cmd);
         }
     }
+    rc = install_cached(cache_path, pkg->filename);
 
     if (rc != 0) {
         fprintf(stderr, "spm: pkgadd returned %d\n", rc);
         return -1;
     }
+
+    if (save_history(pkg, has_previous ? &previous : NULL) != 0)
+        fprintf(stderr, "spm: installed package, but could not update verified rollback history\n");
 
     /* Record in our database */
     pkgdb_record_install(db, pkg, cache_path);
@@ -1038,13 +1195,14 @@ int pkgdb_install(pkgdb_t *db, int avail_idx)
 int pkgdb_remove(pkgdb_t *db, int inst_idx)
 {
     const installed_pkg_t *pkg;
-    char cmd[512];
+    char *arguments[4];
+    char removed_name[128];
     int rc;
 
     if (inst_idx < 0 || inst_idx >= db->inst_count) return -1;
     pkg = &db->installed[inst_idx];
 
-    if (!pkg->pkg_code[0]) {
+    if (!spm_safe_component(pkg->pkg_code)) {
         fprintf(stderr, "spm: no package code for %s\n", pkg->name);
         return -1;
     }
@@ -1052,9 +1210,11 @@ int pkgdb_remove(pkgdb_t *db, int inst_idx)
     printf("Removing %s %s (pkg: %s)...\n", pkg->name, pkg->version,
            pkg->pkg_code);
 
-    snprintf(cmd, sizeof(cmd),
-             "/usr/sbin/pkgrm -n %s 2>&1", pkg->pkg_code);
-    rc = system(cmd);
+    strncpy(removed_name, pkg->name, sizeof(removed_name) - 1);
+    removed_name[sizeof(removed_name) - 1] = '\0';
+    arguments[0] = "/usr/sbin/pkgrm"; arguments[1] = "-n";
+    arguments[2] = (char *)pkg->pkg_code; arguments[3] = NULL;
+    rc = spm_run(arguments, -1);
 
     if (rc != 0) {
         fprintf(stderr, "spm: pkgrm returned %d\n", rc);
@@ -1065,9 +1225,12 @@ int pkgdb_remove(pkgdb_t *db, int inst_idx)
     memmove(&db->installed[inst_idx], &db->installed[inst_idx + 1],
             (db->inst_count - inst_idx - 1) * sizeof(installed_pkg_t));
     db->inst_count--;
-    pkgdb_save_installed(db);
+    if (pkgdb_save_installed(db) != 0) {
+        fprintf(stderr, "spm: package removed, but installed database could not be saved\n");
+        return -1;
+    }
 
-    printf("  %s removed.\n", pkg->name);
+    printf("  %s removed.\n", removed_name);
     return 0;
 }
 
@@ -1077,79 +1240,29 @@ int pkgdb_remove(pkgdb_t *db, int inst_idx)
 
 int pkgdb_rollback(pkgdb_t *db, int inst_idx)
 {
-    const installed_pkg_t *pkg;
-    char backup_pattern[512];
-    char cmd[1024];
-    char backup_file[512];
-    struct stat st;
-
+    avail_pkg_t previous;
+    char journal[512], path[512];
+    const installed_pkg_t *current;
+    int rc;
     if (inst_idx < 0 || inst_idx >= db->inst_count) return -1;
-    pkg = &db->installed[inst_idx];
-
-    /* Look for backup file */
-    snprintf(backup_pattern, sizeof(backup_pattern),
-             "%s/%s-*.bak", SPM_ROLLBACK, pkg->name);
-
-    /* Use the stored pkg_file path for rollback */
-    if (pkg->pkg_file[0] && stat(pkg->pkg_file, &st) == 0) {
-        printf("Rolling back %s to cached version...\n", pkg->name);
-
-        /* Remove current */
-        if (pkg->pkg_code[0]) {
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgrm -n %s 2>&1", pkg->pkg_code);
-            system(cmd);
-        }
-
-        /* Reinstall from cache */
-        if (strstr(pkg->pkg_file, ".gz")) {
-            char uncompressed[512];
-            snprintf(uncompressed, sizeof(uncompressed), "%s/rollback.tmp",
-                     SPM_CACHE);
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/bin/gzip -dc %s > %s", pkg->pkg_file, uncompressed);
-            system(cmd);
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgadd -n -a %s -d %s all 2>&1",
-                     pkgadd_admin_file(), uncompressed);
-            system(cmd);
-            unlink(uncompressed);
-        } else {
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgadd -n -a %s -d %s all 2>&1",
-                     pkgadd_admin_file(), pkg->pkg_file);
-            system(cmd);
-        }
-
-        printf("  Rollback complete.\n");
-        return 0;
+    current = &db->installed[inst_idx];
+    if (load_history(current, &previous, journal, sizeof(journal)) != 0) {
+        fprintf(stderr, "spm: no verified previous-version history; rollback refused\n");
+        return -1;
     }
-
-    /* Try backup directory */
-    snprintf(backup_file, sizeof(backup_file),
-             "%s/%s-%s.bak", SPM_ROLLBACK, pkg->name, pkg->version);
-    if (stat(backup_file, &st) == 0) {
-        printf("Rolling back %s from backup...\n", pkg->name);
-
-        if (pkg->pkg_code[0]) {
-            snprintf(cmd, sizeof(cmd),
-                     "/usr/sbin/pkgrm -n %s 2>&1", pkg->pkg_code);
-            system(cmd);
-        }
-
-        snprintf(cmd, sizeof(cmd),
-                 "/usr/sbin/pkgadd -n -a %s -d %s all 2>&1",
-                 pkgadd_admin_file(), backup_file);
-        system(cmd);
-
-        printf("  Rollback complete.\n");
-        return 0;
+    if (snprintf(path, sizeof(path), "%s/%s", SPM_CACHE, previous.filename) >= (int)sizeof(path) ||
+        spm_verify_file(path, previous.md5, previous.source_type == SRC_GITHUB) != 0) return -1;
+    printf("Rolling back %s to verified version %s...\n", previous.name, previous.version);
+    /* pkgadd's overwrite policy replaces the package; never remove it first. */
+    rc = install_cached(path, previous.filename);
+    if (rc != 0) {
+        fprintf(stderr, "spm: rollback installation failed (%d); package state may require repair\n", rc);
+        return -1;
     }
-
-    fprintf(stderr, "spm: no rollback data found for %s\n", pkg->name);
-    fprintf(stderr, "  Checked: %s\n", pkg->pkg_file);
-    fprintf(stderr, "  Checked: %s\n", backup_file);
-    return -1;
+    pkgdb_record_install(db, &previous, path);
+    if (unlink(journal) != 0) fprintf(stderr, "spm: could not remove consumed rollback history\n");
+    printf("  Rollback installation completed.\n");
+    return 0;
 }
 
 /* ================================================================
