@@ -62,8 +62,9 @@ agent: $(AGENT_TARGET)
 $(CLI_TARGET): $(CLI_OBJS)
 	$(CC) $(LDFLAGS) -o $(CLI_TARGET) $(CLI_OBJS) $(LIBS)
 
+# Prefer the explicitly selected CDE library directories over generic paths.
 $(GUI_TARGET): $(GUI_OBJS)
-	$(CC) $(LDFLAGS) $(MOTIF_LDFLAGS) -o $(GUI_TARGET) $(GUI_OBJS) $(LIBS) $(MOTIF_LIBS)
+	$(CC) $(MOTIF_LDFLAGS) $(LDFLAGS) -o $(GUI_TARGET) $(GUI_OBJS) $(LIBS) $(MOTIF_LIBS)
 
 $(AGENT_TARGET): $(AGENT_OBJS)
 	$(CC) $(LDFLAGS) -o $(AGENT_TARGET) $(AGENT_OBJS) $(LIBS)
