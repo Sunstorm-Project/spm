@@ -2,9 +2,9 @@
  * http.h - HTTP/HTTPS client for Solaris 7 with native OpenSSL
  *
  * Uses raw BSD sockets for HTTP and OpenSSL (libssl/libcrypto)
- * for HTTPS.  Links against TGCware OpenSSL at /usr/tgcware.
+ * for HTTPS. Loads package-owned OpenSSL3 from /opt/sst/lib.
  *
- * On Solaris, link with: -lssl -lcrypto -lsocket -lnsl
+ * On Solaris, link with: -lsocket -lnsl -ldl
  */
 
 #ifndef SPM_HTTP_H
@@ -39,7 +39,7 @@ void http_shutdown(void);
 
 /*
  * Set the path to the CA certificate bundle.
- * If not called, uses /usr/tgcware/etc/curl-ca-bundle.pem by default.
+ * If not called, uses /opt/sst/etc/ssl/cert.pem by default.
  */
 void http_set_ca_bundle(const char *path);
 

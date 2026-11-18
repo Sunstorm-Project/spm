@@ -10,6 +10,7 @@
 
 #define SPM_VERSION   "0.1.0"
 #define SPM_BASE      "/opt/sst"
+#define SPM_CLI       SPM_BASE "/bin/spm"
 #define SPM_ETC       SPM_BASE "/etc"
 #define SPM_VAR       SPM_BASE "/var"
 #define SPM_CACHE     SPM_VAR  "/cache"
@@ -21,8 +22,7 @@
 #define SPM_AGENT_LOG SPM_VAR  "/agent.log"
 #define SPM_UPDATE_STATUS SPM_VAR "/update.status"
 
-#define SPM_CA_BUNDLE     "/usr/tgcware/etc/curl-ca-bundle.pem"
-#define SPM_CA_BUNDLE_ALT SPM_BASE "/etc/ssl/certs/ca-bundle.crt"
+#define SPM_CA_BUNDLE SPM_BASE "/etc/ssl/cert.pem"
 
 #define REPO_TYPE_TGCWARE   1
 #define REPO_TYPE_GITHUB    2
@@ -32,8 +32,8 @@
 
 /* Repository definition */
 typedef struct {
-    char name[64];            /* Short ID: "tgcware", "firefly128" */
-    char display_name[128];   /* Human name: "TGCware Solaris 7 SPARC" */
+    char name[64];            /* Short ID: "sunstorm", "firefly128" */
+    char display_name[128];   /* Human-readable repository name */
     int  type;                /* REPO_TYPE_TGCWARE or REPO_TYPE_GITHUB */
     int  enabled;             /* 1 = enabled, 0 = disabled */
 

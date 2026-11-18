@@ -29,7 +29,7 @@ typedef struct {
     char description[256];
     char download_url[512]; /* Full download URL */
     char filename[320];     /* Filename of the package file */
-    char md5[64];           /* MD5 (TGCware) or SHA256 (GitHub) */
+    char md5[80];           /* Legacy field name: MD5 or sha256:<64 hex> */
     char deps[512];         /* Comma-sep dep codes (TGCware) */
     char size_str[16];      /* "720K" */
     char repo_name[64];     /* "tgcware" or "firefly128" */
@@ -151,7 +151,7 @@ int pkgdb_remove(pkgdb_t *db, int inst_idx);
 
 /*
  * Rollback an installed package to the previous version.
- * Requires a previous backup in the rollback directory.
+ * Requires recorded previous-version history and a verified cached artifact.
  * Returns 0 on success, -1 on error.
  */
 int pkgdb_rollback(pkgdb_t *db, int inst_idx);

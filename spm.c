@@ -1,8 +1,8 @@
 /*
  * spm.c - Sunstorm Package Manager
  *
- * Main CLI entry point.  Uses native OpenSSL (TGCware) for
- * HTTPS access to TGCware repositories and GitHub releases.
+ * Main CLI entry point.  Uses package-owned OpenSSL3 for
+ * HTTPS access to configured repositories and GitHub releases.
  *
  * Commands:
  *   update                  - Refresh package indices
@@ -17,7 +17,7 @@
  *   repo list               - List configured repos
  *   cache clean             - Clear download cache
  *
- * Build: see Makefile (requires -lssl -lcrypto -lsocket -lnsl)
+ * Build: see Makefile (runtime-loaded OpenSSL3; -lsolcompat -lsocket -lnsl -ldl)
  */
 
 #include "config.h"
@@ -63,7 +63,7 @@ static void usage(void)
         "  cache clean         Clear download cache\n"
         "\n"
         "Configuration: %s/repos.conf\n"
-        "SSL: native OpenSSL (TGCware)\n"
+        "SSL: package-owned OpenSSL3\n"
         "\n",
         SPM_VERSION, SPM_ETC);
 }
@@ -602,7 +602,7 @@ static int cmd_repo_list(void)
         printf("\n");
     }
 
-    printf("SSL: native OpenSSL (TGCware)\n");
+    printf("SSL: package-owned OpenSSL3\n");
     if (g_config.ca_bundle[0])
         printf("CA bundle: %s\n", g_config.ca_bundle);
     return 0;

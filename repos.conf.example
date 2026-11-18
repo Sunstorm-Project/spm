@@ -1,0 +1,21 @@
+# spm repository configuration
+[ssl]
+ca_bundle = /opt/sst/etc/ssl/cert.pem
+
+[agent]
+interval = 21600
+notify = yes
+
+[repo:firefly128]
+type = github
+name = firefly128 SPARC Apps
+owner = firefly128
+repos = pizzafool,sparccord,wesnoth-sparc
+enabled = yes
+
+[repo:sunstorm]
+type = github
+name = Sunstorm Distribution
+owner = Sunstorm-Project
+repos = sunstorm
+enabled = yes
