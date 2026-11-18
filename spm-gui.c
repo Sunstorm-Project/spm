@@ -1700,8 +1700,8 @@ static void about_cb(Widget w, XtPointer client, XtPointer call)
         "spm %s\n\n"
         "Sunstorm Package Manager\n"
         "Motif/CDE GUI\n\n"
-        "Native OpenSSL (TGCware)\n"
-        "Indexes TGCware + GitHub repos",
+        "Package-owned OpenSSL3\n"
+        "Indexes configured package repositories",
         SPM_VERSION);
 
     msg = XmStringCreateLocalized(buf);

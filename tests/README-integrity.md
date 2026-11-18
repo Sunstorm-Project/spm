@@ -29,6 +29,10 @@ GUI, and agent builds. Verify that rejected packages never reach pkgadd.
 These checks validate bytes against index metadata. They do not authenticate
 an untrusted index, repair TLS hostname validation, or repair rollback.
 
+The deployed verifier loads only `/opt/sst/lib/libcrypto.so.3`, matching the
+HTTP client. Missing package-owned OpenSSL3 fails verification instead of
+searching another prefix or the ambient loader path.
+
 Bootstrap qualification: the shared verifier requires libcrypto even for
 HTTP/MD5 packages. On a bare machine install OpenSSL through native pkgadd
 from trusted media before using spm-bootstrap for downloaded packages.

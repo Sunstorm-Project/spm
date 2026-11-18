@@ -938,11 +938,6 @@ static int install_cached(const char *path, const char *filename)
             arguments[0] = "/usr/bin/gzip";
             rc = spm_run(arguments, fd);
         }
-        if (rc && compressed == 2) {
-            if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0) { rc = -1; goto done; }
-            arguments[0] = "/usr/tgcware/bin/gzip";
-            rc = spm_run(arguments, fd);
-        }
         if (rc || fstat(fd, &st) != 0 || st.st_size <= 0) { rc = -1; goto done; }
         if (close(fd) != 0) { fd = -1; rc = -1; goto done; }
         fd = -1; input = temporary;

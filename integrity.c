@@ -56,9 +56,7 @@ int spm_verify_file(const char *path, const char *expected, int require_sha256)
 #ifdef SPM_TEST_CRYPTO_LIBRARY
     library = dlopen(SPM_TEST_CRYPTO_LIBRARY, RTLD_NOW | RTLD_LOCAL);
 #else
-    library = dlopen("/opt/sst/lib/libcrypto.so", RTLD_NOW | RTLD_LOCAL);
-    if (!library) library = dlopen("/usr/tgcware/lib/libcrypto.so", RTLD_NOW | RTLD_LOCAL);
-    if (!library) library = dlopen("libcrypto.so", RTLD_NOW | RTLD_LOCAL);
+    library = dlopen("/opt/sst/lib/libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
 #endif
     if (!library) goto done;
     ctx_new = (EVP_MD_CTX *(*)(void))dlsym(library, "EVP_MD_CTX_new");

@@ -17,7 +17,7 @@ ACTION SpmGui
     EXEC_STRING     /opt/sst/bin/spm-gui
     ICON            Spm
     WINDOW_TYPE     NO_STDIO
-    DESCRIPTION     Manage software packages for Sunstorm and TGCware \
+    DESCRIPTION     Manage Sunstorm software packages \
                     on Solaris 7 SPARC.  Requires root password.
 }
 
